@@ -1,30 +1,111 @@
-package com.example;
+package com.example.client;
 
-import net.fabricmc.api.ModInitializer;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
-import net.minecraft.resources.Identifier;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+public class ExampleModClient implements ClientModInitializer {
 
-public class ExampleMod implements ModInitializer {
-	public static final String MOD_ID = "modid";
+    private static final String API_KEY = "AQ.Ab8RN6Kpjd_1dH6mfyKrah9lHASI0JD5gkfsZLNUFlTFRrhYEw";
+    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
-	// This logger is used to write text to the console and the log file.
-	// It is considered best practice to use your mod id as the logger's name.
-	// That way, it's clear which mod wrote info, warnings, and errors.
-	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+    @Override
+    public void onInitializeClient() {
+        // Registriert den Befehl direkt im Client-Command-System von Fabric
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(ClientCommandManager.literal("ai")
+                .then(ClientCommandManager.argument("prompt", StringArgumentType.greedyString())
+                    .executes(context -> {
+                        String prompt = StringArgumentType.getString(context, "prompt");
 
-	@Override
-	public void onInitialize() {
-		// This code runs as soon as Minecraft is in a mod-load-ready state.
-		// However, some things (like resources) may still be uninitialized.
-		// Proceed with mild caution.
+                        // Rückmeldung im Chat
+                        if (MinecraftClient.getInstance().player != null) {
+                            MinecraftClient.getInstance().player.sendMessage(
+                                Text.literal("[Gemini] Denk nach...").formatted(Formatting.GRAY), false
+                            );
+                        }
 
-		LOGGER.info("Hello Fabric world!");
-	}
+                        // Anfrage senden
+                        sendToGemini(prompt);
 
-	public static Identifier id(String path) {
-		return Identifier.fromNamespaceAndPath(MOD_ID, path);
-	}
+                        return 1;
+                    })
+                )
+            );
+        });
+    }
+
+    private void sendToGemini(String prompt) {
+        String jsonBody = "{\"contents\":[{\"parts\":[{\"text\":\"" + prompt.replace("\"", "\\\"") + "\"}]}]}";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + API_KEY))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+
+        HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                .thenAccept(response -> {
+                    MinecraftClient.getInstance().execute(() -> {
+                        if (MinecraftClient.getInstance().player != null) {
+                            if (response.statusCode() == 200) {
+                                String aiReply = extractTextFromJson(response.body());
+                                MinecraftClient.getInstance().player.sendMessage(
+                                    Text.literal("[Gemini] " + aiReply).formatted(Formatting.GOLD), false
+                                );
+                            } else {
+                                MinecraftClient.getInstance().player.sendMessage(
+                                    Text.literal("[Gemini] Fehler: HTTP " + response.statusCode()).formatted(Formatting.RED), false
+                                );
+                            }
+                        }
+                    });
+                }).exceptionally(ex -> {
+                    MinecraftClient.getInstance().execute(() -> {
+                        if (MinecraftClient.getInstance().player != null) {
+                            MinecraftClient.getInstance().player.sendMessage(
+                                Text.literal("[Gemini] Verbindungsfehler!").formatted(Formatting.RED), false
+                            );
+                        }
+                    });
+                    return null;
+                });
+    }
+
+    private String extractTextFromJson(String json) {
+        try {
+            int textIndex = json.indexOf("\"text\": \"");
+            if (textIndex != -1) {
+                int startIndex = textIndex + 9;
+                int endIndex = json.indexOf("\"", startIndex);
+                StringBuilder result = new StringBuilder();
+                boolean escaped = false;
+                for (int i = startIndex; i < endIndex; i++) {
+                    char c = json.charAt(i);
+                    if (escaped) {
+                        if (c == 'n') result.append("\n");
+                        else result.append(c);
+                        escaped = false;
+                    } else if (c == '\\') {
+                        escaped = true;
+                    } else {
+                        result.append(c);
+                    }
+                }
+                return result.toString().replace("\\n", " ");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "Konnte Antwort nicht lesen.";
+    }
 }
